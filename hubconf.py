@@ -23,6 +23,46 @@ def _load_state_dict(local_file_path: Optional[str] = None):
             
     return state_dict['model']
 
+
+def pad_input(orig_H, orig_W):
+    if orig_W % 32 == 0:
+        l = 0
+        r = 0
+    else:
+        new_W = 32 * ((orig_W // 32) + 1)
+        l = (new_W - orig_W) // 2
+        r = (new_W - orig_W) - l
+
+    if orig_H % 32 == 0:
+        t = 0
+        b = 0
+    else:
+        new_H = 32 * ((orig_H // 32) + 1)
+        t = (new_H - orig_H) // 2
+        b = (new_H - orig_H) - t
+    return l, r, t, b
+
+
+def get_intrins_from_fov(new_fov, H, W, device):
+    # NOTE: top-left pixel should be (0,0)
+    if W >= H:
+        new_fu = (W / 2.0) / np.tan(np.deg2rad(new_fov / 2.0))
+        new_fv = (W / 2.0) / np.tan(np.deg2rad(new_fov / 2.0))
+    else:
+        new_fu = (H / 2.0) / np.tan(np.deg2rad(new_fov / 2.0))
+        new_fv = (H / 2.0) / np.tan(np.deg2rad(new_fov / 2.0))
+
+    new_cu = (W / 2.0) - 0.5
+    new_cv = (H / 2.0) - 0.5
+
+    new_intrins = torch.tensor([
+        [new_fu,    0,          new_cu  ],
+        [0,         new_fv,     new_cv  ],
+        [0,         0,          1       ]
+    ], dtype=torch.float32, device=device)
+
+    return new_intrins
+
 class Predictor:
     def __init__(self, model) -> None:
         from models.dsine import DSINE
@@ -35,29 +75,31 @@ class Predictor:
         image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
         return self.infer_pil(image)
     
-    def infer_pil(self, img, intrins=None):
-        import utils.utils as utils
-        img = np.array(img).astype(np.float32) / 255.0
-        img = torch.from_numpy(img).permute(2, 0, 1).unsqueeze(0).to(self.device)
-        _, _, orig_H, orig_W = img.shape
+    def infer_tensor(self, img_tensor, intrins=None):
+        img_tensor = img_tensor.to(self.device)
+        _, _, orig_H, orig_W = img_tensor.shape
 
         # zero-pad the input image so that both the width and height are multiples of 32
-        l, r, t, b = utils.pad_input(orig_H, orig_W)
-        img = F.pad(img, (l, r, t, b), mode="constant", value=0.0)
-        img = self.transform(img)
+        l, r, t, b = pad_input(orig_H, orig_W)
+        img_tensor = F.pad(img_tensor, (l, r, t, b), mode="constant", value=0.0)
+        img_tensor = self.transform(img_tensor)
 
         if intrins is None:
-            intrins = utils.get_intrins_from_fov(new_fov=60.0, H=orig_H, W=orig_W, device=self.device).unsqueeze(0)
+            intrins = get_intrins_from_fov(new_fov=60.0, H=orig_H, W=orig_W, device=self.device).unsqueeze(0)
         
         intrins[:, 0, 2] += l
         intrins[:, 1, 2] += t
 
         with torch.no_grad():
-            pred_norm = self.model(img, intrins=intrins)[-1]
+            pred_norm = self.model(img_tensor, intrins=intrins)[-1]
             pred_norm = pred_norm[:, :, t:t+orig_H, l:l+orig_W]
         
-        # pred_norm_np = pred_norm.cpu().detach().numpy()[0,:,:,:].transpose(1, 2, 0) # (H, W, 3)
         return pred_norm
+    
+    def infer_pil(self, img, intrins=None):
+        img = np.array(img).astype(np.float32) / 255.0
+        img = torch.from_numpy(img).permute(2, 0, 1).unsqueeze(0)
+        return self.infer_tensor(img)
 
 def DSINE(local_file_path: Optional[str] = None):
     from models import dsine
