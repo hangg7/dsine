@@ -13,9 +13,14 @@ def _load_state_dict(local_file_path: Optional[str] = None):
     else:
         # Load state_dict from the default URL
         file_name = "dsine.pt"
-        url = f"https://huggingface.co/camenduru/DSINE/resolve/main/dsine.pt"
-        state_dict = torch.hub.load_state_dict_from_url(url, file_name=file_name, map_location=torch.device("cpu"))
-
+        try:
+            url = f"https://huggingface.co/camenduru/DSINE/resolve/main/dsine.pt"
+            state_dict = torch.hub.load_state_dict_from_url(url, file_name=file_name, map_location=torch.device("cpu"))
+        except:
+            print("Failed to load from huggingface, change to download from mirror")
+            url = f"https://normal-estimation-model.s3.amazonaws.com/dsine.pt"
+            state_dict = torch.hub.load_state_dict_from_url(url, file_name=file_name, map_location=torch.device("cpu"))
+            
     return state_dict['model']
 
 class Predictor:
