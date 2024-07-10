@@ -20,7 +20,7 @@ def _load_state_dict(local_file_path: Optional[str] = None):
             print("Failed to load from huggingface, change to download from mirror")
             url = f"https://normal-estimation-model.s3.amazonaws.com/dsine.pt"
             state_dict = torch.hub.load_state_dict_from_url(url, file_name=file_name, map_location=torch.device("cpu"))
-            
+
     return state_dict['model']
 
 
@@ -66,15 +66,45 @@ def get_intrins_from_fov(new_fov, H, W, device):
 class Predictor:
     def __init__(self, model) -> None:
         from models.dsine import DSINE
-        self.device = torch.device('cuda')
+        self.device = torch.device('cpu')
         self.model = model
         self.transform = transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
+
+    def to(self, device):
+        self.model = self.model.to(device)
+        self.model.pixel_coords = self.model.pixel_coords.to(device)
+        self.device = device
+        return self
     
     def infer_cv2(self, image):
         import cv2
         image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
         return self.infer_pil(image)
     
+    def infer_pil(self, img, intrins=None):
+        import utils.utils as utils
+        img = np.array(img).astype(np.float32) / 255.0
+        img = torch.from_numpy(img).permute(2, 0, 1).unsqueeze(0).to(self.device)
+        _, _, orig_H, orig_W = img.shape
+
+        # zero-pad the input image so that both the width and height are multiples of 32
+        l, r, t, b = utils.pad_input(orig_H, orig_W)
+        img = F.pad(img, (l, r, t, b), mode="constant", value=0.0)
+        img = self.transform(img)
+
+        if intrins is None:
+            intrins = utils.get_intrins_from_fov(new_fov=60.0, H=orig_H, W=orig_W, device=self.device).unsqueeze(0)
+        
+        intrins[:, 0, 2] += l
+        intrins[:, 1, 2] += t
+
+        with torch.no_grad():
+            pred_norm = self.model(img, intrins=intrins)[-1]
+            pred_norm = pred_norm[:, :, t:t+orig_H, l:l+orig_W]
+        
+        # pred_norm_np = pred_norm.cpu().detach().numpy()[0,:,:,:].transpose(1, 2, 0) # (H, W, 3)
+        return pred_norm
+
     def infer_tensor(self, img_tensor, intrins=None):
         img_tensor = img_tensor.to(self.device)
         _, _, orig_H, orig_W = img_tensor.shape
@@ -95,11 +125,6 @@ class Predictor:
             pred_norm = pred_norm[:, :, t:t+orig_H, l:l+orig_W]
         
         return pred_norm
-    
-    def infer_pil(self, img, intrins=None):
-        img = np.array(img).astype(np.float32) / 255.0
-        img = torch.from_numpy(img).permute(2, 0, 1).unsqueeze(0)
-        return self.infer_tensor(img)
 
 def DSINE(local_file_path: Optional[str] = None):
     from models import dsine
@@ -108,8 +133,6 @@ def DSINE(local_file_path: Optional[str] = None):
     model = dsine.DSINE()
     model.load_state_dict(state_dict, strict=True)
     model.eval()
-    model = model.to(torch.device("cuda"))
-    model.pixel_coords = model.pixel_coords.to(torch.device("cuda"))
 
     return Predictor(model)
 
